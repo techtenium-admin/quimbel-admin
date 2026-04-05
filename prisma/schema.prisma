@@ -1,0 +1,494 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL") // Direct connection for migrations (port 5432)
+}
+
+model User {
+  id               String    @id @default(uuid())
+  email            String    @unique
+  password_hash    String
+  name             String?
+  company_name     String?
+  timezone         String    @default("UTC")
+  currency         String    @default("USD")
+  country          String?   // ISO 3166-1 alpha-2 (e.g. US, GB, PK) for region-aware payment methods
+  date_format      String?   // e.g. MM/DD/YYYY, DD/MM/YYYY - for invoice rendering
+  subscription_plan String   @default("free") // free, pro, enterprise
+  subscription_status String? // active, canceled, past_due
+  stripe_customer_id String? @unique
+  // Stripe Connect - for receiving invoice payments
+  stripe_connect_account_id String? @unique // Stripe Connect account ID (acct_xxx)
+  stripe_connect_onboarding_complete Boolean @default(false) // Whether onboarding is complete
+  stripe_connect_account_status String? // active, restricted, pending, etc.
+  
+  // Account roles - user can be both contractor and client
+  roles            String[]  @default(["contractor"]) // ["contractor", "client"] or just one
+  active_role      String    @default("contractor") // Which role they're currently viewing
+  
+  // Branding fields
+  logo_url         String?
+  business_address String?
+  primary_color    String?   @default("#5F8CFF")
+  
+  // GDPR compliance fields
+  privacy_consent  Boolean   @default(false)
+  privacy_consent_date DateTime?
+  privacy_policy_version String?   // Version accepted (e.g. "2024-01-01"); re-prompt when current > this
+  terms_accepted   Boolean   @default(false)
+  terms_accepted_date DateTime?
+  terms_version    String?   // Version accepted; re-prompt when current > this
+  marketing_consent Boolean  @default(false)
+  
+  // Reminder automation settings
+  reminder_enabled Boolean   @default(true)
+  reminder_days_before_due Json? // Array of days before due date [3, 1]
+  reminder_days_after_due Json? // Array of days after due date [1, 3, 7, 14]
+  reminder_max_per_invoice Int @default(5)
+  reminder_frequency String  @default("daily") // daily, weekly
+  
+  // Late fee settings
+  late_fee_enabled Boolean  @default(false)
+  late_fee_type String?     // 'flat' or 'percentage'
+  late_fee_amount Decimal?  @db.Decimal(10, 2) // For flat fees
+  late_fee_percentage Decimal? @db.Decimal(5, 4) // For percentage fees (e.g., 0.05 for 5%)
+  late_fee_grace_period Int @default(0) // Days after due date before applying
+
+  // Profitability: default hourly cost rate (labor cost) for project profit reports
+  default_hourly_cost Decimal? @db.Decimal(10, 2)
+  
+  // Email verification (OTP at signup). Default true for backward compatibility (existing users).
+  email_verified    Boolean   @default(true)
+  email_verified_at DateTime?
+
+  // Two-factor authentication
+  two_factor_enabled Boolean @default(false)
+  two_factor_secret String?  // Encrypted TOTP secret
+  two_factor_backup_codes Json? // Array of backup codes (hashed)
+  
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  clients          Client[]
+  invoices         Invoice[]
+  estimates        Estimate[]
+  time_entries     TimeEntry[]
+  payments         Payment[]
+  client_interactions ClientInteraction[]
+  email_logs       EmailLog[]
+  expenses         Expense[]
+  bank_transfer_instructions BankTransferInstruction[]
+  projects         Project[]
+  email_verification_otps   EmailVerificationOtp[]
+  support_tickets  SupportTicket[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// Display-only bank details for invoices/emails. Client pays directly to contractor; platform never holds funds.
+model BankTransferInstruction {
+  id                    String   @id @default(uuid())
+  user_id               String
+  bank_name             String
+  account_holder_name   String
+  account_number        String?  // Full number for display (client needs it to pay)
+  routing_number        String?  // US ACH/wire
+  sort_code             String?  // UK
+  iban                  String?
+  bic_swift             String?
+  reference_instruction String?  // e.g. "Use invoice number as reference"
+  currency              String?  @db.VarChar(3)
+  is_default            Boolean  @default(true)
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
+
+  user                  User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("bank_transfer_instructions")
+}
+
+model Client {
+  id               String    @id @default(uuid())
+  user_id          String
+  name             String
+  email            String?
+  phone            String?
+  company_name     String?
+  address          String?
+  city             String?
+  state            String?
+  zip              String?
+  country          String?
+  hourly_rate      Decimal?  @db.Decimal(10, 2)
+  
+  // Aggregates for CRM
+  total_paid       Decimal   @default(0) @db.Decimal(10, 2)
+  total_invoiced   Decimal   @default(0) @db.Decimal(10, 2)
+  avg_days_to_pay  Int?      // Average days to pay invoices
+  late_payment_count Int     @default(0)
+  pause_work       Boolean   @default(false) // Pause work flag
+  
+  metadata         Json?     // Additional custom fields
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  invoices         Invoice[]
+  estimates        Estimate[]
+  time_entries     TimeEntry[]
+  client_interactions ClientInteraction[]
+  expenses         Expense[] // Expenses billable to this client
+  projects         Project[]
+
+  @@index([user_id])
+  @@index([email])
+  @@map("clients")
+}
+
+model Estimate {
+  id          String    @id @default(uuid())
+  user_id     String
+  client_id   String
+  status      String    @default("draft") // draft, sent, accepted, declined
+  issue_date  DateTime  @default(now())
+  expiry_date DateTime?
+  subtotal    Decimal   @db.Decimal(10, 2)
+  tax_rate    Decimal?  @default(0) @db.Decimal(5, 4)
+  tax_amount  Decimal?  @default(0) @db.Decimal(10, 2)
+  total       Decimal   @db.Decimal(10, 2)
+  currency    String    @default("USD")
+  notes       String?
+  sent_at     DateTime?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+
+  user     User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client   Client   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  items    EstimateItem[]
+  invoices Invoice[]
+
+  @@index([user_id])
+  @@index([client_id])
+  @@index([status])
+  @@map("estimates")
+}
+
+model EstimateItem {
+  id          String   @id @default(uuid())
+  estimate_id String
+  description String
+  quantity    Decimal  @default(1) @db.Decimal(10, 2)
+  unit_price  Decimal  @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(10, 2)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  estimate Estimate @relation(fields: [estimate_id], references: [id], onDelete: Cascade)
+
+  @@index([estimate_id])
+  @@map("estimate_items")
+}
+
+model Project {
+  id            String    @id @default(uuid())
+  user_id       String
+  client_id     String
+  name          String
+  description   String?
+  status        String    @default("active") // active, completed, on_hold
+  hourly_rate   Decimal?  @db.Decimal(10, 2)  // Billable rate
+  hourly_cost   Decimal?  @db.Decimal(10, 2)  // Labor cost rate (overrides user default for profitability)
+  budget        Decimal?  @db.Decimal(10, 2)
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  user         User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client       Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  time_entries TimeEntry[]
+  expenses     Expense[]
+
+  @@index([user_id])
+  @@index([client_id])
+  @@map("projects")
+}
+
+model Invoice {
+  id               String    @id @default(uuid())
+  user_id          String
+  client_id        String
+  estimate_id      String?   // Optional: traceability when created from estimate
+  invoice_number   String
+  status           String    @default("draft") // draft, sent, paid, overdue, canceled
+  issue_date       DateTime  @default(now())
+  due_date         DateTime?
+  paid_date        DateTime?
+  amount           Decimal   @db.Decimal(10, 2)
+  tax_rate         Decimal?  @default(0) @db.Decimal(5, 4)
+  tax_amount       Decimal?  @default(0) @db.Decimal(10, 2)
+  discount_amount  Decimal?  @default(0) @db.Decimal(10, 2)
+  discount_type    String?   // 'percentage' | 'amount' - how discount was entered
+  discount_value   Decimal?  @db.Decimal(10, 2) // e.g. 10 for 10%, or fixed amount
+  total_amount     Decimal   @db.Decimal(10, 2)
+  currency         String    @default("USD")
+  notes            String?
+  terms            String?
+  is_recurring     Boolean   @default(false)
+  recurring_frequency String? // monthly, quarterly, yearly
+  recurring_interval Int?     @default(1) // e.g., every 1 month, every 2 months
+  next_recurring_date DateTime?
+  parent_invoice_id String?   // Link to original recurring invoice template
+  late_fee_applied Boolean   @default(false)
+  late_fee_amount  Decimal?  @default(0) @db.Decimal(10, 2)
+  late_fee_applied_date DateTime?
+  first_viewed_at  DateTime?
+  last_viewed_at   DateTime?
+  view_count       Int       @default(0)
+  scheduled_send_date DateTime? // For scheduled sending
+  sent_at          DateTime? // Actual send timestamp
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client           Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  estimate         Estimate? @relation(fields: [estimate_id], references: [id], onDelete: SetNull)
+  items            InvoiceItem[]
+  payments         Payment[]
+  email_logs       EmailLog[]
+  expenses         Expense[] // Expenses billed on this invoice
+  time_entries     TimeEntry[] // Time entries billed on this invoice
+
+  @@unique([user_id, invoice_number])
+  @@index([user_id])
+  @@index([client_id])
+  @@index([estimate_id])
+  @@index([status])
+  @@index([due_date])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id               String    @id @default(uuid())
+  invoice_id       String
+  description      String
+  quantity         Decimal   @default(1) @db.Decimal(10, 2)
+  unit_price       Decimal   @db.Decimal(10, 2)
+  total            Decimal   @db.Decimal(10, 2)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  invoice          Invoice   @relation(fields: [invoice_id], references: [id], onDelete: Cascade)
+
+  @@index([invoice_id])
+  @@map("invoice_items")
+}
+
+model TimeEntry {
+  id               String    @id @default(uuid())
+  user_id          String
+  client_id        String?
+  project_id       String?
+  description      String
+  duration_minutes Int
+  date             DateTime  @default(now())
+  started_at       DateTime? // When timer was started (for global timer)
+  ended_at         DateTime? // When timer was stopped
+  billable         Boolean   @default(true)
+  hourly_rate      Decimal?  @db.Decimal(10, 2)
+  invoice_id       String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client           Client?   @relation(fields: [client_id], references: [id], onDelete: SetNull)
+  project          Project?  @relation(fields: [project_id], references: [id], onDelete: SetNull)
+  invoice          Invoice?  @relation(fields: [invoice_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([client_id])
+  @@index([project_id])
+  @@index([invoice_id])
+  @@index([date])
+  @@map("time_entries")
+}
+
+model Payment {
+  id               String    @id @default(uuid())
+  user_id          String
+  invoice_id       String
+  amount_paid      Decimal   @db.Decimal(10, 2)
+  payment_date     DateTime  @default(now())
+  payment_method   String?   // stripe, bank_transfer, cash, check
+  status           String    @default("pending") // pending, completed, failed, refunded, escrowed, transferred
+  stripe_payment_intent_id String? @unique
+  stripe_charge_id String?
+  // Escrow fields - for payments held until user connects account
+  is_escrowed      Boolean   @default(false) // Whether payment is held in escrow
+  transfer_id      String?   // Stripe transfer ID when moved to connected account
+  notes            String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  invoice          Invoice   @relation(fields: [invoice_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([invoice_id])
+  @@index([status])
+  @@index([is_escrowed])
+  @@map("payments")
+}
+
+model ClientInteraction {
+  id               String    @id @default(uuid())
+  user_id          String
+  client_id        String
+  type             String    // call, email, meeting, note
+  subject          String?
+  notes            String?
+  interaction_date DateTime  @default(now())
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client           Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([client_id])
+  @@index([interaction_date])
+  @@map("client_interactions")
+}
+
+model EmailLog {
+  id               String    @id @default(uuid())
+  user_id          String
+  invoice_id       String?
+  recipient_email  String
+  subject          String
+  status           String    @default("sent") // sent, delivered, opened, bounced, failed
+  opened_at        DateTime?
+  clicked_at       DateTime?
+  error_message    String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  invoice          Invoice?  @relation(fields: [invoice_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([invoice_id])
+  @@index([recipient_email])
+  @@index([status])
+  @@map("email_logs")
+}
+
+model Expense {
+  id               String    @id @default(uuid())
+  user_id          String
+  category         String    // office_supplies, travel, meals, software, etc.
+  description      String
+  amount           Decimal   @db.Decimal(10, 2)
+  date             DateTime  @default(now())
+  vendor           String?
+  payment_method   String?   // credit_card, cash, bank_transfer, etc.
+  receipt_url      String?   // URL to receipt image/file
+  tax_deductible   Boolean   @default(true)
+  notes            String?
+
+  // Approval workflow
+  status           String    @default("pending") // pending, approved, rejected
+  reviewed_by      String?   // user_id of reviewer (owner for now)
+  reviewed_at      DateTime?
+
+  // Client-billable expense tracking
+  client_id        String?   // Link to client for billable expenses
+  project_id       String?   // Optional link to project
+  billable         Boolean   @default(false) // Is this expense billable to a client?
+  invoice_id       String?   // Invoice this expense was billed on
+  markup_percentage Decimal? @db.Decimal(5, 2) // Optional markup % for billable expenses
+  billed_amount    Decimal?  @db.Decimal(10, 2) // Amount actually billed to client
+
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  user             User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  client           Client?   @relation(fields: [client_id], references: [id], onDelete: SetNull)
+  project          Project?  @relation(fields: [project_id], references: [id], onDelete: SetNull)
+  invoice          Invoice?  @relation(fields: [invoice_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([client_id])
+  @@index([project_id])
+  @@index([invoice_id])
+  @@index([category])
+  @@index([date])
+  @@index([billable])
+  @@index([status])
+  @@map("expenses")
+}
+
+model ProcessedStripeEvent {
+  id         String   @id @default(uuid())
+  event_id   String   @unique
+  created_at DateTime @default(now())
+
+  @@map("processed_stripe_events")
+}
+
+// One-time codes for email verification (signup, etc.). Stored hashed; short TTL.
+model EmailVerificationOtp {
+  id         String   @id @default(uuid())
+  user_id    String
+  email      String
+  otp_hash   String   // SHA-256 hash of OTP for verification
+  expires_at DateTime
+  created_at DateTime @default(now())
+
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([email])
+  @@index([expires_at])
+  @@map("email_verification_otps")
+}
+
+ model SupportTicket {
+    id         String    @id @default(uuid())
+    user_id    String
+    user       User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    subject    String
+    category   String
+    status     String    @default("open")
+    priority   String    @default("normal")
+    created_at DateTime  @default(now())
+    updated_at DateTime  @updatedAt
+
+    messages   SupportMessage[]
+
+    @@index([user_id])
+    @@index([status])
+    @@map("support_tickets")
+  }
+
+ model SupportMessage {
+    id               String        @id @default(uuid())
+    ticket_id        String
+    ticket           SupportTicket @relation(fields: [ticket_id], references: [id], onDelete: Cascade)
+    sender_type      String
+    sender_email     String?
+    sender_name      String?
+    body             String        @db.Text
+    email_message_id String?
+    created_at       DateTime      @default(now())
+
+    @@index([ticket_id])
+    @@map("support_messages")
+  }
