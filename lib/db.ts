@@ -27,3 +27,17 @@ export const db =
   })
 
 globalForPrisma.prisma = db
+
+let connectPromise: Promise<void> | null = null
+
+/** Warm up pool before first query (reduces first-request latency on cold serverless). */
+export async function ensureConnected(): Promise<void> {
+  if (connectPromise === null) {
+    connectPromise = db.$connect().catch((error) => {
+      connectPromise = null
+      console.error('Failed to connect to database:', error)
+      throw error
+    })
+  }
+  await connectPromise
+}

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { requireAdminSession } from '@/lib/require-admin-session'
+import { db, ensureConnected } from '@/lib/db'
+
+export const dynamic = 'force-dynamic'
 
 const ALLOWED_STATUS = ['open', 'in_progress', 'resolved', 'closed'] as const
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const unauthorized = await requireAdminSession()
-  if (unauthorized) return unauthorized
+  await ensureConnected()
 
   const { id } = await params
 
@@ -34,8 +34,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
 }
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const unauthorized = await requireAdminSession()
-  if (unauthorized) return unauthorized
+  await ensureConnected()
 
   const { id } = await params
   const body = await request.json()

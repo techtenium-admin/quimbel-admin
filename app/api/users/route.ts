@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { requireAdminSession } from '@/lib/require-admin-session'
+import { db, ensureConnected } from '@/lib/db'
+
+export const dynamic = 'force-dynamic'
 
 const PAGE_SIZE = 25
 
 export async function GET(request: NextRequest) {
-  const unauthorized = await requireAdminSession()
-  if (unauthorized) return unauthorized
+  await ensureConnected()
 
   const { searchParams } = new URL(request.url)
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1)
