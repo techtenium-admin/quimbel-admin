@@ -14,8 +14,8 @@
 .DS_Store
 *.pem
 .env
-.env
 .env*.local
+*.tsbuildinfo
 
 # debug
 npm-debug.log*

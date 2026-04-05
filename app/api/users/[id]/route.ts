@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { requireAdminSession } from '@/lib/require-admin-session'
+import { db, ensureConnected } from '@/lib/db'
+
+export const dynamic = 'force-dynamic'
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const unauthorized = await requireAdminSession()
-  if (unauthorized) return unauthorized
+  await ensureConnected()
 
   const { id } = await params
 

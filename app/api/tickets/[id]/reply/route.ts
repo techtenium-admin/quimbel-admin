@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { db, ensureConnected } from '@/lib/db'
 import { sendEmail } from '@/lib/email'
 import { generateTicketReplyNotificationHTML } from '@/lib/email-templates-support'
-import { requireAdminSession } from '@/lib/require-admin-session'
 import { getAppUrlForLinks } from '@/lib/admin-env'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const unauthorized = await requireAdminSession()
-  if (unauthorized) return unauthorized
+  await ensureConnected()
 
   const { id } = await params
   const body = await request.json()

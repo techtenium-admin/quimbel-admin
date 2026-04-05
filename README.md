@@ -34,6 +34,26 @@ yarn dev
 
 Port **3001**. Ensure `quimbel-nextjs` is not required for admin to function (only the shared database and Resend).
 
+## Testing
+
+```bash
+yarn test          # Vitest (dashboard stats mapping)
+yarn lint
+yarn type-check
+yarn build
+```
+
+Smoke checks (dev server on `:3001`): `GET /api/stats` without cookie → **401**; `GET /login` → **200**; wrong password `POST /api/auth/login` → **401**.
+
+## Performance
+
+- **Dashboard `/api/stats`** uses **two SQL round-trips** (scalar aggregates + invoice status breakdown), not one query per metric — important when the database is remote (e.g. Supabase).
+- **Auth:** JWT is verified **once** in `middleware.ts`. API routes no longer repeat verification.
+- **`ensureConnected()`** warms the Prisma pool before queries to reduce cold-start latency.
+- **Tickets list** uses `select` (not full `include`) and caps at **150** rows.
+
+In development, React Strict Mode can **run effects twice**, so you may see duplicate `fetch` calls in the Network tab — production does not do that.
+
 ## Security notes
 
 - Restrict deployment (VPN, IP allowlist, private network).

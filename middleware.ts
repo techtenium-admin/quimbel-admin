@@ -3,6 +3,11 @@ import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 import { getAdminJwtSecretKey } from '@/lib/admin-env'
 
+/**
+ * Single JWT verification per request.
+ * - API (except /api/auth): 401 JSON — no redirect (so fetch() gets proper errors).
+ * - Pages: redirect to /login when unauthenticated.
+ */
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
@@ -16,15 +21,34 @@ export async function middleware(request: NextRequest) {
   }
 
   const token = request.cookies.get('admin-token')?.value
+  const secret = getAdminJwtSecretKey()
+
+  const isProtectedApi = pathname.startsWith('/api/') && !pathname.startsWith('/api/auth')
+
+  async function verifyOrFailApi(): Promise<NextResponse | null> {
+    if (!token || !secret) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    try {
+      await jwtVerify(token, secret)
+      return null
+    } catch {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+  }
+
+  if (isProtectedApi) {
+    const fail = await verifyOrFailApi()
+    if (fail) return fail
+    return NextResponse.next()
+  }
+
   if (!token) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
-
-  const secret = getAdminJwtSecretKey()
   if (!secret) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
-
   try {
     await jwtVerify(token, secret)
   } catch {
